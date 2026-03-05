@@ -62,7 +62,7 @@ function calculateEdge(overOdds, underOdds) {
 // Fetch from Odds API - CORRECTED to use /odds endpoint
 async function fetchFromAPI(sport, market) {
   // Use the /odds endpoint which includes upcoming games with odds
-  const url = `${BASE_URL}/sports/${sport}/odds?apiKey=${API_KEY}&regions=us&markets=${market}&oddsFormat=american&bookmakers=pinnacle,betfair`;
+  const url = `${BASE_URL}/sports/${sport}/odds?apiKey=${API_KEY}&regions=us&markets=${market}&oddsFormat=american&bookmakers=draftkings,fanduel`;
   
   console.log(`Fetching ${sport} ${market}...`);
   
