@@ -5,43 +5,30 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json());
 
 // Configuration
-const API_KEY = process.env.ODDS_API_KEY || 'YOUR_API_KEY_HERE';
-const BASE_URL = 'https://api.the-odds-api.com/v4';
+const ODDS_API_KEY = process.env.ODDS_API_KEY || 'YOUR_API_KEY_HERE';
+const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
+const PRIZEPICKS_API = 'https://api.prizepicks.com/projections';
+const UNDERDOG_API = 'https://api.underdogfantasy.com/beta/v3/over_under_lines';
 
 // Cache
 let cachedData = [];
 let lastUpdate = null;
-let stats = { calls: 0, credits: 0 };
-let lastError = null;
-
-// Sports to fetch
-const SPORTS = [
-  'basketball_nba',
-  'americanfootball_nfl',
-  'icehockey_nhl',
-  'baseball_mlb',
-  'basketball_ncaab'
-];
-
-// Prop markets  
-const MARKETS = [
-  'player_points',
-  'player_rebounds',
-  'player_assists',
-  'player_threes',
-  'player_pass_tds',
-  'player_rush_yds',
-  'player_receptions'
-];
+let stats = { 
+  prizePicksCalls: 0, 
+  underdogCalls: 0, 
+  oddsApiCalls: 0,
+  creditsUsed: 0 
+};
 
 // Helper: Convert American odds to decimal
 function americanToDecimal(odds) {
+  if (!odds || odds === 0) return 2.0; // Default to even odds if missing
   return odds > 0 ? (odds / 100) + 1 : (100 / Math.abs(odds)) + 1;
 }
 
 // Helper: Calculate no-vig probability and EV
 function calculateEdge(overOdds, underOdds) {
-  const HURDLE = 0.5425; // 54.25% PrizePicks breakeven
+  const HURDLE = 0.5425; // 54.25% PrizePicks breakeven for 5-6 leg flex
   
   const overDec = americanToDecimal(overOdds);
   const underDec = americanToDecimal(underOdds);
@@ -50,8 +37,15 @@ function calculateEdge(overOdds, underOdds) {
   const underImpl = 1 / underDec;
   
   const total = overImpl + underImpl;
-  const fairOver = (overImpl / total) * 100;
-  const fairUnder = (underImpl / total) * 100;
+  
+  // Handle edge case where total is invalid
+  if (total === 0 || !isFinite(total)) {
+    return { fairOver: 50, fairUnder: 50, overEV: 0, underEV: 0 };
+  }
+  
+  const vigFactor = 1 / total;
+  const fairOver = (overImpl * vigFactor) * 100;
+  const fairUnder = (underImpl * vigFactor) * 100;
   
   const overEV = fairOver > (HURDLE * 100) ? ((fairOver / 100 / HURDLE) - 1) * 100 : 0;
   const underEV = fairUnder > (HURDLE * 100) ? ((fairUnder / 100 / HURDLE) - 1) * 100 : 0;
@@ -59,207 +53,381 @@ function calculateEdge(overOdds, underOdds) {
   return { fairOver, fairUnder, overEV, underEV };
 }
 
-// Fetch from Odds API - CORRECTED to use /odds endpoint
-async function fetchFromAPI(sport, market) {
-  // Use the /odds endpoint which includes upcoming games with odds
-  const url = `${BASE_URL}/sports/${sport}/odds?apiKey=${API_KEY}&regions=us&markets=${market}&oddsFormat=american&bookmakers=draftkings,fanduel`;
+// Fetch PrizePicks projections
+async function fetchPrizePicks() {
+  console.log('Fetching PrizePicks projections...');
   
-  console.log(`Fetching ${sport} ${market}...`);
+  try {
+    const response = await fetch(PRIZEPICKS_API);
+    
+    if (!response.ok) {
+      console.log('PrizePicks API error:', response.status);
+      return [];
+    }
+    
+    const data = await response.json();
+    stats.prizePicksCalls++;
+    
+    if (!data.data || !Array.isArray(data.data)) {
+      console.log('Unexpected PrizePicks data structure');
+      return [];
+    }
+    
+    console.log(`Found ${data.data.length} PrizePicks projections`);
+    
+    // Parse projections into our format
+    const projections = data.data
+      .filter(proj => proj.attributes && proj.attributes.line_score)
+      .map(proj => {
+        const attrs = proj.attributes;
+        return {
+          platform: 'PrizePicks',
+          playerName: attrs.name || 'Unknown Player',
+          league: attrs.league || 'Unknown',
+          team: attrs.team || '',
+          statType: attrs.stat_type || '',
+          line: parseFloat(attrs.line_score),
+          gameTime: attrs.start_time,
+          gameDescription: attrs.description || ''
+        };
+      });
+    
+    console.log(`Parsed ${projections.length} valid PrizePicks projections`);
+    return projections;
+    
+  } catch (error) {
+    console.error('Error fetching PrizePicks:', error.message);
+    return [];
+  }
+}
+
+// Fetch Underdog projections
+async function fetchUnderdog() {
+  console.log('Fetching Underdog projections...');
+  
+  try {
+    const response = await fetch(UNDERDOG_API);
+    
+    if (!response.ok) {
+      console.log('Underdog API error:', response.status);
+      return [];
+    }
+    
+    const data = await response.json();
+    stats.underdogCalls++;
+    
+    if (!data.over_under_lines || !Array.isArray(data.over_under_lines)) {
+      console.log('Unexpected Underdog data structure');
+      return [];
+    }
+    
+    console.log(`Found ${data.over_under_lines.length} Underdog lines`);
+    
+    // Parse lines into our format
+    const projections = data.over_under_lines
+      .filter(line => line.stat_value && line.appearance)
+      .map(line => {
+        const player = line.appearance || {};
+        return {
+          platform: 'Underdog',
+          playerName: player.name || 'Unknown Player',
+          league: line.game ? (line.game.sport || 'Unknown') : 'Unknown',
+          team: player.team ? (player.team.name || '') : '',
+          statType: line.stat_type || '',
+          line: parseFloat(line.stat_value),
+          gameTime: line.match ? line.match.start_time : null,
+          gameDescription: ''
+        };
+      });
+    
+    console.log(`Parsed ${projections.length} valid Underdog projections`);
+    return projections;
+    
+  } catch (error) {
+    console.error('Error fetching Underdog:', error.message);
+    return [];
+  }
+}
+
+// Fetch sharp odds from The Odds API for a specific sport/market
+async function fetchSharpOdds(sport, market) {
+  const url = `${ODDS_API_BASE}/sports/${sport}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=${market}&oddsFormat=american&bookmakers=pinnacle`;
   
   try {
     const response = await fetch(url);
     
     if (!response.ok) {
-      console.log(`API Error: ${response.status} ${response.statusText}`);
       return [];
     }
     
-    const data = await response.json();
-    console.log(`  Found ${data.length} upcoming games with odds`);
-    return data;
+    const events = await response.json();
+    stats.oddsApiCalls++;
+    stats.creditsUsed++;
+    
+    return events;
     
   } catch (error) {
-    console.error(`Fetch error:`, error.message);
+    console.error(`Error fetching sharp odds for ${sport}/${market}:`, error.message);
     return [];
   }
 }
 
-// Process API data
-function processData(events, sport) {
-  const players = [];
-  let id = 0;
+// Map stat types to Odds API market names
+function mapStatTypeToMarket(statType) {
+  const mapping = {
+    'Points': 'player_points',
+    'Pts': 'player_points',
+    'Rebounds': 'player_rebounds',
+    'Reb': 'player_rebounds',
+    'Assists': 'player_assists',
+    'Ast': 'player_assists',
+    '3-PT Made': 'player_threes',
+    'Threes': 'player_threes',
+    'Pts+Rebs+Asts': 'player_points_rebounds_assists',
+    'Fantasy Score': 'player_fantasy_points',
+    'Passing Yards': 'player_pass_yds',
+    'Passing TDs': 'player_pass_tds',
+    'Rushing Yards': 'player_rush_yds',
+    'Receptions': 'player_receptions',
+    'Receiving Yards': 'player_reception_yds'
+  };
   
-  console.log(`Processing ${events.length} events for ${sport}...`);
-  
-  events.forEach(event => {
-    if (!event.bookmakers || event.bookmakers.length === 0) {
-      console.log(`  No bookmakers for ${event.home_team} vs ${event.away_team}`);
-      return;
-    }
-    
-    event.bookmakers.forEach(book => {
-      if (!book.markets) return;
-      
-      book.markets.forEach(market => {
-        if (!market.outcomes) return;
-        
-        // Group outcomes by player
-        const playerMap = new Map();
-        
-        market.outcomes.forEach(outcome => {
-          const playerName = outcome.description || outcome.name;
-          const line = outcome.point;
-          
-          if (!playerMap.has(playerName)) {
-            playerMap.set(playerName, { over: null, under: null, line: line });
-          }
-          
-          const data = playerMap.get(playerName);
-          
-          // Check if this is Over or Under
-          if (outcome.name === 'Over' || outcome.name.includes('Over')) {
-            data.over = outcome.price;
-          } else if (outcome.name === 'Under' || outcome.name.includes('Under')) {
-            data.under = outcome.price;
-          }
-        });
-        
-        // Calculate edges for each player
-        playerMap.forEach((data, playerName) => {
-          if (data.over && data.under && data.line) {
-            const edge = calculateEdge(data.over, data.under);
-            
-            // Only include if Over has positive EV
-            if (edge.overEV > 0) {
-              players.push({
-                id: id++,
-                name: playerName,
-                team: event.home_team,
-                league: sport.replace(/_/g, ' ').toUpperCase(),
-                game: `${event.home_team} vs ${event.away_team}`,
-                stat: 'Over',
-                line: market.key.replace('player_', '').replace(/_/g, ' '),
-                value: data.line,
-                fairProb: edge.fairOver,
-                evPercent: edge.overEV,
-                sharpOdds: data.over,
-                gameTime: event.commence_time,
-                bookmaker: book.key
-              });
-            }
-            
-            // Also check if Under has positive EV
-            if (edge.underEV > 0) {
-              players.push({
-                id: id++,
-                name: playerName,
-                team: event.away_team,
-                league: sport.replace(/_/g, ' ').toUpperCase(),
-                game: `${event.home_team} vs ${event.away_team}`,
-                stat: 'Under',
-                line: market.key.replace('player_', '').replace(/_/g, ' '),
-                value: data.line,
-                fairProb: edge.fairUnder,
-                evPercent: edge.underEV,
-                sharpOdds: data.under,
-                gameTime: event.commence_time,
-                bookmaker: book.key
-              });
-            }
-          }
-        });
-      });
-    });
-  });
-  
-  console.log(`  Generated ${players.length} +EV plays`);
-  return players;
+  return mapping[statType] || null;
 }
 
-// Refresh data from API
-async function refreshData() {
-  console.log('='.repeat(60));
-  console.log('🔄 FETCHING UPCOMING GAMES FROM ODDS API');
-  console.log('='.repeat(60));
-  console.log('API Key set:', API_KEY !== 'YOUR_API_KEY_HERE' ? 'YES ✓' : 'NO ✗');
-  console.log('Time:', new Date().toLocaleString());
-  console.log('='.repeat(60));
+// Map league to Odds API sport
+function mapLeagueToSport(league) {
+  const mapping = {
+    'NBA': 'basketball_nba',
+    'NFL': 'americanfootball_nfl',
+    'MLB': 'baseball_mlb',
+    'NHL': 'icehockey_nhl',
+    'NCAAB': 'basketball_ncaab',
+    'NCAAF': 'americanfootball_ncaaf'
+  };
   
-  const startTime = Date.now();
-  let allPlayers = [];
-  let totalGames = 0;
-  let apiCallsMade = 0;
-  
-  try {
-    for (const sport of SPORTS) {
-      for (const market of MARKETS) {
-        const events = await fetchFromAPI(sport, market);
-        totalGames += events.length;
-        apiCallsMade++;
+  return mapping[league] || null;
+}
+
+// Find sharp odds for a specific player/stat combo
+function findSharpOddsForPlayer(sharpEvents, playerName, statType, line) {
+  for (const event of sharpEvents) {
+    if (!event.bookmakers || event.bookmakers.length === 0) continue;
+    
+    for (const book of event.bookmakers) {
+      if (!book.markets) continue;
+      
+      for (const market of book.markets) {
+        if (!market.outcomes) continue;
         
-        const players = processData(events, sport);
-        allPlayers = allPlayers.concat(players);
-        
-        // Rate limit: 1 request per second to avoid hitting API limits
-        await new Promise(resolve => setTimeout(resolve, 1100));
+        for (const outcome of market.outcomes) {
+          // Match by player name and line value
+          const outcomePlayer = outcome.description || outcome.name;
+          const outcomeLine = outcome.point;
+          
+          // Fuzzy match player names (handle variations)
+          const nameMatch = outcomePlayer && playerName && 
+            (outcomePlayer.toLowerCase().includes(playerName.toLowerCase()) ||
+             playerName.toLowerCase().includes(outcomePlayer.toLowerCase()));
+          
+          const lineMatch = outcomeLine && Math.abs(outcomeLine - line) < 0.5;
+          
+          if (nameMatch && lineMatch) {
+            // Find the corresponding Over/Under
+            const overOutcome = market.outcomes.find(o => 
+              (o.description === outcomePlayer || o.name === outcomePlayer) && 
+              (o.name === 'Over' || o.name.includes('Over'))
+            );
+            
+            const underOutcome = market.outcomes.find(o => 
+              (o.description === outcomePlayer || o.name === outcomePlayer) && 
+              (o.name === 'Under' || o.name.includes('Under'))
+            );
+            
+            if (overOutcome && underOutcome) {
+              return {
+                overOdds: overOutcome.price,
+                underOdds: underOutcome.price,
+                bookmaker: book.key
+              };
+            }
+          }
+        }
       }
     }
+  }
+  
+  return null;
+}
+
+// Main refresh function
+async function refreshData() {
+  console.log('='.repeat(70));
+  console.log('🔄 STARTING DATA REFRESH');
+  console.log('='.repeat(70));
+  const startTime = Date.now();
+  
+  try {
+    // Step 1: Fetch PrizePicks and Underdog projections (free!)
+    console.log('\n📊 STEP 1: Fetching DFS platform projections...');
+    const [prizePicksProjs, underdogProjs] = await Promise.all([
+      fetchPrizePicks(),
+      fetchUnderdog()
+    ]);
     
-    // Sort by highest EV first
-    allPlayers.sort((a, b) => b.evPercent - a.evPercent);
+    const allProjections = [...prizePicksProjs, ...underdogProjs];
+    console.log(`Total projections: ${allProjections.length}`);
     
-    // Remove duplicates (same player, same line, same stat)
-    const uniquePlayers = [];
-    const seen = new Set();
+    if (allProjections.length === 0) {
+      console.log('❌ No projections found from PrizePicks or Underdog');
+      return {
+        success: false,
+        message: 'No projections available from PrizePicks or Underdog',
+        data: [],
+        stats: { platforms: 0, withSharpOdds: 0, plusEV: 0 }
+      };
+    }
     
-    allPlayers.forEach(player => {
-      const key = `${player.name}-${player.line}-${player.value}-${player.stat}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniquePlayers.push(player);
+    // Step 2: Get unique sport/market combinations we need sharp odds for
+    console.log('\n📈 STEP 2: Identifying sports/markets to fetch sharp odds...');
+    const sportMarketPairs = new Set();
+    
+    allProjections.forEach(proj => {
+      const sport = mapLeagueToSport(proj.league);
+      const market = mapStatTypeToMarket(proj.statType);
+      
+      if (sport && market) {
+        sportMarketPairs.add(`${sport}|${market}`);
       }
     });
     
-    cachedData = uniquePlayers;
+    console.log(`Need sharp odds for ${sportMarketPairs.size} sport/market combinations`);
+    
+    // Step 3: Fetch sharp odds for each sport/market combo
+    console.log('\n💎 STEP 3: Fetching sharp odds from Pinnacle...');
+    const sharpOddsMap = new Map();
+    
+    for (const pair of sportMarketPairs) {
+      const [sport, market] = pair.split('|');
+      console.log(`  Fetching ${sport} ${market}...`);
+      
+      const events = await fetchSharpOdds(sport, market);
+      sharpOddsMap.set(pair, events);
+      
+      // Rate limit
+      await new Promise(resolve => setTimeout(resolve, 1100));
+    }
+    
+    // Step 4: Match projections with sharp odds and calculate EV
+    console.log('\n🎯 STEP 4: Matching projections with sharp odds...');
+    const plays = [];
+    let matchedCount = 0;
+    
+    allProjections.forEach((proj, index) => {
+      const sport = mapLeagueToSport(proj.league);
+      const market = mapStatTypeToMarket(proj.statType);
+      
+      if (!sport || !market) {
+        return; // Skip if we can't map the stat type
+      }
+      
+      const pairKey = `${sport}|${market}`;
+      const sharpEvents = sharpOddsMap.get(pairKey) || [];
+      
+      const sharpOdds = findSharpOddsForPlayer(
+        sharpEvents,
+        proj.playerName,
+        proj.statType,
+        proj.line
+      );
+      
+      if (sharpOdds) {
+        matchedCount++;
+        
+        const edge = calculateEdge(sharpOdds.overOdds, sharpOdds.underOdds);
+        
+        // Create Over play if it has +EV
+        if (edge.overEV > 0) {
+          plays.push({
+            id: plays.length,
+            platform: proj.platform,
+            name: proj.playerName,
+            team: proj.team,
+            league: proj.league,
+            stat: 'Over',
+            line: proj.statType,
+            value: proj.line,
+            fairProb: edge.fairOver,
+            evPercent: edge.overEV,
+            sharpOdds: sharpOdds.overOdds,
+            gameTime: proj.gameTime,
+            game: proj.gameDescription,
+            bookmaker: sharpOdds.bookmaker
+          });
+        }
+        
+        // Create Under play if it has +EV
+        if (edge.underEV > 0) {
+          plays.push({
+            id: plays.length,
+            platform: proj.platform,
+            name: proj.playerName,
+            team: proj.team,
+            league: proj.league,
+            stat: 'Under',
+            line: proj.statType,
+            value: proj.line,
+            fairProb: edge.fairUnder,
+            evPercent: edge.underEV,
+            sharpOdds: sharpOdds.underOdds,
+            gameTime: proj.gameTime,
+            game: proj.gameDescription,
+            bookmaker: sharpOdds.bookmaker
+          });
+        }
+      }
+    });
+    
+    // Sort by EV
+    plays.sort((a, b) => b.evPercent - a.evPercent);
+    
+    cachedData = plays;
     lastUpdate = Date.now();
-    stats.calls += apiCallsMade;
-    stats.credits += apiCallsMade; // Roughly 1 credit per API call
-    lastError = null;
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     
-    console.log('='.repeat(60));
-    console.log('✅ FETCH COMPLETE');
-    console.log('='.repeat(60));
-    console.log(`Upcoming games scanned: ${totalGames}`);
-    console.log(`API calls made: ${apiCallsMade}`);
-    console.log(`Raw +EV plays found: ${allPlayers.length}`);
-    console.log(`Unique +EV plays: ${uniquePlayers.length}`);
+    console.log('\n' + '='.repeat(70));
+    console.log('✅ REFRESH COMPLETE');
+    console.log('='.repeat(70));
+    console.log(`Total projections found: ${allProjections.length}`);
+    console.log(`  - PrizePicks: ${prizePicksProjs.length}`);
+    console.log(`  - Underdog: ${underdogProjs.length}`);
+    console.log(`Matched with sharp odds: ${matchedCount}`);
+    console.log(`+EV plays found: ${plays.length}`);
     console.log(`Duration: ${duration}s`);
-    console.log(`Credits used this refresh: ~${apiCallsMade}`);
-    console.log(`Total credits used: ~${stats.credits}`);
-    console.log('='.repeat(60));
+    console.log(`API calls to Odds API: ${sportMarketPairs.size}`);
+    console.log(`Credits used: ${sportMarketPairs.size}`);
+    console.log('='.repeat(70));
     
     return {
       success: true,
-      players: uniquePlayers,
-      gamesScanned: totalGames,
-      message: uniquePlayers.length > 0 
-        ? `Found ${uniquePlayers.length} +EV plays from ${totalGames} upcoming games!` 
-        : totalGames > 0
-          ? `Scanned ${totalGames} upcoming games but found no plays above 54.25% threshold`
-          : 'No upcoming games found in the next 24-48 hours'
+      message: `Found ${plays.length} +EV plays from ${allProjections.length} projections`,
+      data: plays,
+      stats: {
+        platforms: allProjections.length,
+        withSharpOdds: matchedCount,
+        plusEV: plays.length
+      }
     };
     
   } catch (error) {
-    console.error('❌ ERROR:', error);
-    lastError = error.message;
+    console.error('❌ Error during refresh:', error);
     
     return {
       success: false,
-      players: [],
-      gamesScanned: 0,
-      message: `Error: ${error.message}`
+      message: `Error: ${error.message}`,
+      data: [],
+      stats: { platforms: 0, withSharpOdds: 0, plusEV: 0 }
     };
   }
 }
@@ -271,43 +439,52 @@ app.get('/api/player-props', (req, res) => {
     data: cachedData,
     lastUpdate: lastUpdate,
     count: cachedData.length,
-    lastError: lastError,
-    usageStats: { totalApiCalls: stats.calls, estimatedCreditsUsed: stats.credits }
+    usageStats: {
+      prizePicksCalls: stats.prizePicksCalls,
+      underdogCalls: stats.underdogCalls,
+      oddsApiCalls: stats.oddsApiCalls,
+      creditsUsed: stats.creditsUsed
+    }
   });
 });
 
 app.post('/api/player-props/refresh', async (req, res) => {
   try {
-    console.log('📡 Manual refresh requested by user');
+    console.log('📡 Manual refresh requested');
     const result = await refreshData();
     
     res.json({
       success: result.success,
       message: result.message,
-      data: result.players,
+      data: result.data,
       lastUpdate: lastUpdate,
-      count: result.players.length,
-      gamesScanned: result.gamesScanned,
-      usageStats: { totalApiCalls: stats.calls, estimatedCreditsUsed: stats.credits }
+      count: result.data.length,
+      stats: result.stats,
+      usageStats: {
+        prizePicksCalls: stats.prizePicksCalls,
+        underdogCalls: stats.underdogCalls,
+        oddsApiCalls: stats.oddsApiCalls,
+        creditsUsed: stats.creditsUsed
+      }
     });
   } catch (error) {
-    console.error('Error in refresh endpoint:', error);
-    res.status(500).json({ 
-      success: false, 
+    console.error('Error in refresh:', error);
+    res.status(500).json({
+      success: false,
       error: error.message,
-      message: 'Failed to fetch from API'
+      message: 'Failed to refresh data'
     });
   }
 });
 
-// Serve HTML (keeping the debug version UI)
+// Serve HTML
 app.get('/', (req, res) => {
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fantasy Optimizer</title>
+  <title>Fantasy Optimizer - PrizePicks & Underdog</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -322,14 +499,15 @@ app.get('/', (req, res) => {
       const [players, setPlayers] = useState([]);
       const [loading, setLoading] = useState(true);
       const [refreshing, setRefreshing] = useState(false);
-      const [stats, setStats] = useState({ totalApiCalls: 0, estimatedCreditsUsed: 0 });
+      const [stats, setStats] = useState({});
       const [lastUpdate, setLastUpdate] = useState(null);
+      const [selectedPlatform, setSelectedPlatform] = useState('ALL');
       const [selectedSport, setSelectedSport] = useState('ALL');
       const [showConfirm, setShowConfirm] = useState(false);
       const [message, setMessage] = useState('');
-      const [gamesScanned, setGamesScanned] = useState(0);
       
-      const sports = ['ALL', 'NBA', 'NFL', 'NHL', 'MLB', 'NCAAB'];
+      const platforms = ['ALL', 'PrizePicks', 'Underdog'];
+      const sports = ['ALL', 'NBA', 'NFL', 'MLB', 'NHL', 'NCAAB'];
       
       async function loadData() {
         try {
@@ -337,13 +515,12 @@ app.get('/', (req, res) => {
           const result = await response.json();
           if (result.success) {
             setPlayers(result.data);
-            setStats(result.usageStats);
+            setStats(result.usageStats || {});
             setLastUpdate(result.lastUpdate);
           }
           setLoading(false);
         } catch (error) {
           console.error('Error:', error);
-          setMessage('Error loading data');
           setLoading(false);
         }
       }
@@ -351,27 +528,21 @@ app.get('/', (req, res) => {
       async function handleRefresh() {
         setShowConfirm(false);
         setRefreshing(true);
-        setMessage('Fetching upcoming games from Odds API... This may take 30-60 seconds.');
+        setMessage('Fetching from PrizePicks & Underdog...');
         
         try {
           const response = await fetch('/api/player-props/refresh', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
+            method: 'POST'
           });
           const result = await response.json();
           
           setPlayers(result.data || []);
-          setStats(result.usageStats);
+          setStats(result.usageStats || {});
           setLastUpdate(result.lastUpdate);
           setMessage(result.message || '');
-          setGamesScanned(result.gamesScanned || 0);
           
-          if (!result.success) {
-            setMessage('API Error: ' + (result.error || 'Unknown error'));
-          }
         } catch (error) {
-          console.error('Error:', error);
-          setMessage('Network error: ' + error.message);
+          setMessage('Error: ' + error.message);
         }
         
         setRefreshing(false);
@@ -385,9 +556,11 @@ app.get('/', (req, res) => {
         return diff < 1 ? 'Just now' : diff < 60 ? diff + 'm ago' : Math.floor(diff/60) + 'h ago';
       };
       
-      const filteredPlayers = selectedSport === 'ALL' 
-        ? players 
-        : players.filter(p => p.league.includes(selectedSport));
+      const filteredPlayers = players.filter(p => {
+        const platformMatch = selectedPlatform === 'ALL' || p.platform === selectedPlatform;
+        const sportMatch = selectedSport === 'ALL' || p.league === selectedSport;
+        return platformMatch && sportMatch;
+      });
       
       return (
         <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white">
@@ -395,20 +568,19 @@ app.get('/', (req, res) => {
             <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
               <div className="bg-slate-900 border border-purple-500/30 rounded-xl p-6 max-w-md">
                 <h3 className="text-lg font-bold mb-2">Refresh Data?</h3>
-                <p className="text-sm mb-4">This will fetch upcoming games and player props from The Odds API. Uses ~35 credits. Takes 30-60 seconds.</p>
+                <p className="text-sm mb-4">Fetches live projections from PrizePicks & Underdog (FREE), then gets sharp odds for comparison (~5-10 credits).</p>
                 <div className="bg-slate-800/50 rounded p-3 mb-4 text-sm">
-                  <div className="flex justify-between mb-1">
-                    <span className="text-slate-400">API Calls:</span>
-                    <span>{stats.totalApiCalls}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Credits Used:</span>
-                    <span className="text-amber-400">~{stats.estimatedCreditsUsed}</span>
+                  <div className="text-slate-400 mb-2">Last refresh:</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>PrizePicks: {stats.prizePicksCalls || 0}</div>
+                    <div>Underdog: {stats.underdogCalls || 0}</div>
+                    <div>Odds API: {stats.oddsApiCalls || 0}</div>
+                    <div className="text-amber-400">Credits: ~{stats.creditsUsed || 0}</div>
                   </div>
                 </div>
                 <div className="flex gap-3">
                   <button onClick={() => setShowConfirm(false)} className="flex-1 px-4 py-2 border border-slate-600 rounded-lg">Cancel</button>
-                  <button onClick={handleRefresh} className="flex-1 px-4 py-2 bg-purple-600 rounded-lg">Fetch Now</button>
+                  <button onClick={handleRefresh} className="flex-1 px-4 py-2 bg-purple-600 rounded-lg">Refresh</button>
                 </div>
               </div>
             </div>
@@ -419,11 +591,11 @@ app.get('/', (req, res) => {
               <div className="flex items-center justify-between mb-6">
                 <div>
                   <h1 className="text-4xl font-bold mb-2">FANTASY OPTIMIZER</h1>
-                  <p className="text-purple-300">+EV Player Props · Upcoming Games</p>
+                  <p className="text-purple-300">PrizePicks & Underdog +EV Finder</p>
                 </div>
                 <div className="text-right">
                   <div className="text-sm text-slate-400 mb-2">
-                    Last: {formatTime()} | Calls: {stats.totalApiCalls} | Credits: ~{stats.estimatedCreditsUsed}
+                    Last: {formatTime()} | Credits: ~{stats.creditsUsed || 0}
                   </div>
                   <button
                     onClick={() => setShowConfirm(true)}
@@ -435,26 +607,47 @@ app.get('/', (req, res) => {
                 </div>
               </div>
               
-              <div className="flex gap-2 overflow-x-auto mb-4">
-                {sports.map(sport => (
-                  <button
-                    key={sport}
-                    onClick={() => setSelectedSport(sport)}
-                    className={\`px-4 py-2 rounded-lg font-medium transition \${
-                      selectedSport === sport 
-                        ? 'bg-purple-600 text-white' 
-                        : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700/50'
-                    }\`}
-                  >
-                    {sport}
-                  </button>
-                ))}
+              <div className="mb-4">
+                <div className="text-xs text-slate-400 mb-2">Platform:</div>
+                <div className="flex gap-2">
+                  {platforms.map(platform => (
+                    <button
+                      key={platform}
+                      onClick={() => setSelectedPlatform(platform)}
+                      className={\`px-4 py-2 rounded-lg text-sm font-medium transition \${
+                        selectedPlatform === platform 
+                          ? 'bg-purple-600 text-white' 
+                          : 'bg-slate-800/50 text-slate-300'
+                      }\`}
+                    >
+                      {platform}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="mb-4">
+                <div className="text-xs text-slate-400 mb-2">Sport:</div>
+                <div className="flex gap-2 flex-wrap">
+                  {sports.map(sport => (
+                    <button
+                      key={sport}
+                      onClick={() => setSelectedSport(sport)}
+                      className={\`px-4 py-2 rounded-lg text-sm font-medium transition \${
+                        selectedSport === sport 
+                          ? 'bg-purple-600 text-white' 
+                          : 'bg-slate-800/50 text-slate-300'
+                      }\`}
+                    >
+                      {sport}
+                    </button>
+                  ))}
+                </div>
               </div>
               
               {message && (
-                <div className="bg-blue-950/30 border border-blue-500/30 rounded-lg p-4 mb-4">
+                <div className="bg-blue-950/30 border border-blue-500/30 rounded-lg p-4">
                   <p className="text-sm text-blue-300">{message}</p>
-                  {gamesScanned > 0 && <p className="text-xs text-slate-400 mt-2">Scanned {gamesScanned} upcoming games</p>}
                 </div>
               )}
             </header>
@@ -469,12 +662,12 @@ app.get('/', (req, res) => {
               {!loading && players.length === 0 && !refreshing && (
                 <div className="text-center py-20">
                   <h2 className="text-2xl font-bold mb-4">No Data Available</h2>
-                  <p className="text-slate-400 mb-6">Click refresh to fetch +EV plays from upcoming games</p>
+                  <p className="text-slate-400 mb-6">Click refresh to fetch live projections from PrizePicks & Underdog</p>
                   <button
                     onClick={() => setShowConfirm(true)}
                     className="px-8 py-4 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium text-lg"
                   >
-                    Fetch Upcoming Games
+                    Fetch Projections
                   </button>
                 </div>
               )}
@@ -484,7 +677,7 @@ app.get('/', (req, res) => {
                   <div className="bg-slate-800/50 rounded-lg p-4 mb-6">
                     <h2 className="text-2xl font-bold">{filteredPlayers.length} +EV Plays Found</h2>
                     <p className="text-slate-400 text-sm">
-                      {selectedSport === 'ALL' ? 'All sports' : selectedSport} | Sorted by highest EV
+                      {selectedPlatform} | {selectedSport} | Sorted by highest EV
                     </p>
                   </div>
                   
@@ -495,6 +688,9 @@ app.get('/', (req, res) => {
                           <div className="flex-1">
                             <div className="flex items-center gap-3 mb-2">
                               <h3 className="text-xl font-bold">{player.name}</h3>
+                              <span className="px-2 py-1 bg-blue-600/30 rounded text-xs font-medium">
+                                {player.platform}
+                              </span>
                               <span className="px-2 py-1 bg-purple-600/30 rounded text-xs font-medium">
                                 {player.league}
                               </span>
@@ -504,18 +700,17 @@ app.get('/', (req, res) => {
                             </div>
                             <p className="text-slate-400 text-sm mb-2">{player.team}</p>
                             <p className="text-purple-300 mb-1 font-medium">{player.line}: {player.value}</p>
-                            <p className="text-xs text-slate-500 mb-1">{player.game}</p>
-                            <p className="text-xs text-slate-600">Game: {new Date(player.gameTime).toLocaleString()}</p>
+                            {player.game && <p className="text-xs text-slate-500">{player.game}</p>}
                           </div>
                           <div className="text-right">
                             <div className="text-xs text-slate-400 mb-1">Fair Win Prob</div>
                             <div className="text-3xl font-bold text-emerald-400 mb-1">
                               {player.fairProb.toFixed(1)}%
                             </div>
-                            <div className="text-lg font-bold text-emerald-400">
+                            <div className="text-lg font-bold text-emerald-400 mb-2">
                               +{player.evPercent.toFixed(1)}% EV
                             </div>
-                            <div className="text-xs text-slate-500 mt-2">
+                            <div className="text-xs text-slate-500">
                               Sharp: {player.sharpOdds > 0 ? '+' : ''}{player.sharpOdds}
                             </div>
                           </div>
@@ -528,7 +723,7 @@ app.get('/', (req, res) => {
               
               {!loading && players.length > 0 && filteredPlayers.length === 0 && (
                 <div className="text-center py-20">
-                  <p className="text-slate-400">No {selectedSport} plays found. Try another sport.</p>
+                  <p className="text-slate-400">No plays match your filters. Try different options.</p>
                 </div>
               )}
             </main>
@@ -547,11 +742,14 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('='.repeat(60));
-  console.log('🚀 FANTASY OPTIMIZER SERVER STARTED');
-  console.log('='.repeat(60));
+  console.log('='.repeat(70));
+  console.log('🚀 FANTASY OPTIMIZER - PRIZEPICKS & UNDERDOG EDITION');
+  console.log('='.repeat(70));
   console.log('Port:', PORT);
-  console.log('API Key configured:', API_KEY !== 'YOUR_API_KEY_HERE' ? 'YES ✓' : 'NO ✗');
-  console.log('Mode: Fetching UPCOMING games (pre-match)');
-  console.log('='.repeat(60));
+  console.log('Odds API Key:', ODDS_API_KEY !== 'YOUR_API_KEY_HERE' ? 'Configured ✓' : 'Not set ✗');
+  console.log('Data sources:');
+  console.log('  - PrizePicks API (FREE)');
+  console.log('  - Underdog API (FREE)');
+  console.log('  - Sharp odds from Pinnacle (uses credits)');
+  console.log('='.repeat(70));
 });
