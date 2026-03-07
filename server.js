@@ -101,12 +101,17 @@ async function fetchPrizePicks() {
   }
 }
 
-// Fetch Underdog projections
+// Fetch Underdog projections - DEBUG VERSION
 async function fetchUnderdog() {
   console.log('Fetching Underdog projections...');
   
   try {
-    const response = await fetch(UNDERDOG_API);
+    const response = await fetch(UNDERDOG_API, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json'
+      }
+    });
     
     if (!response.ok) {
       console.log('Underdog API error:', response.status);
@@ -116,35 +121,99 @@ async function fetchUnderdog() {
     const data = await response.json();
     stats.underdogCalls++;
     
+    console.log('DEBUG: Underdog response keys:', Object.keys(data));
+    
     if (!data.over_under_lines || !Array.isArray(data.over_under_lines)) {
-      console.log('Unexpected Underdog data structure');
+      console.log('DEBUG: Missing over_under_lines array');
+      console.log('DEBUG: Data structure:', JSON.stringify(data).substring(0, 500));
       return [];
     }
     
     console.log(`Found ${data.over_under_lines.length} Underdog lines`);
     
-    // Parse lines into our format
-    const projections = data.over_under_lines
-      .filter(line => line.stat_value && line.appearance)
-      .map(line => {
-        const player = line.appearance || {};
-        return {
-          platform: 'Underdog',
-          playerName: player.name || 'Unknown Player',
-          league: line.game ? (line.game.sport || 'Unknown') : 'Unknown',
-          team: player.team ? (player.team.name || '') : '',
-          statType: line.stat_type || '',
-          line: parseFloat(line.stat_value),
-          gameTime: line.match ? line.match.start_time : null,
-          gameDescription: ''
-        };
+    // DEBUG: Show first 3 lines completely
+    if (data.over_under_lines.length > 0) {
+      console.log('DEBUG: First line structure:');
+      console.log(JSON.stringify(data.over_under_lines[0], null, 2));
+      
+      if (data.over_under_lines.length > 1) {
+        console.log('DEBUG: Second line structure:');
+        console.log(JSON.stringify(data.over_under_lines[1], null, 2));
+      }
+    }
+    
+    // More flexible parsing
+    const projections = [];
+    let skippedCount = 0;
+    
+    data.over_under_lines.forEach((line, index) => {
+      // Log why each line is skipped
+      if (!line.stat_value && !line.line) {
+        console.log(`DEBUG: Line ${index} skipped - no stat_value or line field`);
+        skippedCount++;
+        return;
+      }
+      
+      if (!line.appearance) {
+        console.log(`DEBUG: Line ${index} skipped - no appearance field`);
+        console.log(`DEBUG: Available fields:`, Object.keys(line));
+        skippedCount++;
+        return;
+      }
+      
+      // Try multiple ways to get player name
+      const player = line.appearance;
+      let playerName = player.name || 
+                       player.display_name ||
+                       (player.first_name && player.last_name ? `${player.first_name} ${player.last_name}` : null);
+      
+      if (!playerName) {
+        console.log(`DEBUG: Line ${index} - couldn't find player name`);
+        console.log(`DEBUG: Appearance fields:`, Object.keys(player));
+        skippedCount++;
+        return;
+      }
+      
+      // Try multiple ways to get each field
+      const statValue = line.stat_value || line.line || line.over_under_line;
+      const league = line.game?.sport || 
+                     line.over_under?.appearance_stat?.game_stat?.game?.sport ||
+                     line.sport ||
+                     'Unknown';
+      const team = player.team?.name || 
+                   player.team_name || 
+                   player.team?.abbreviation ||
+                   '';
+      const statType = line.stat_type || 
+                       line.title || 
+                       line.stat ||
+                       '';
+      
+      projections.push({
+        platform: 'Underdog',
+        playerName: playerName,
+        league: league.toUpperCase(),
+        team: team,
+        statType: statType,
+        line: parseFloat(statValue),
+        gameTime: line.match?.start_time || line.game?.scheduled_at || line.start_time || null,
+        gameDescription: ''
       });
+    });
     
     console.log(`Parsed ${projections.length} valid Underdog projections`);
+    console.log(`Skipped ${skippedCount} lines due to missing fields`);
+    
+    // Show a sample of what we got
+    if (projections.length > 0) {
+      console.log('DEBUG: Sample parsed projection:', projections[0]);
+    }
+    
     return projections;
     
   } catch (error) {
     console.error('Error fetching Underdog:', error.message);
+    console.error('Stack:', error.stack);
     return [];
   }
 }
