@@ -101,7 +101,7 @@ async function fetchPrizePicks() {
   }
 }
 
-// Fetch Underdog projections - DEBUG VERSION
+// Fetch Underdog projections - FIXED for actual API structure
 async function fetchUnderdog() {
   console.log('Fetching Underdog projections...');
   
@@ -121,99 +121,79 @@ async function fetchUnderdog() {
     const data = await response.json();
     stats.underdogCalls++;
     
-    console.log('DEBUG: Underdog response keys:', Object.keys(data));
+    console.log('Underdog response received');
     
     if (!data.over_under_lines || !Array.isArray(data.over_under_lines)) {
-      console.log('DEBUG: Missing over_under_lines array');
-      console.log('DEBUG: Data structure:', JSON.stringify(data).substring(0, 500));
+      console.log('No over_under_lines array found');
       return [];
     }
     
     console.log(`Found ${data.over_under_lines.length} Underdog lines`);
     
-    // DEBUG: Show first 3 lines completely
-    if (data.over_under_lines.length > 0) {
-      console.log('DEBUG: First line structure:');
-      console.log(JSON.stringify(data.over_under_lines[0], null, 2));
-      
-      if (data.over_under_lines.length > 1) {
-        console.log('DEBUG: Second line structure:');
-        console.log(JSON.stringify(data.over_under_lines[1], null, 2));
-      }
-    }
-    
-    // More flexible parsing
+    // Parse using actual API structure
     const projections = [];
-    let skippedCount = 0;
     
     data.over_under_lines.forEach((line, index) => {
-      // Log why each line is skipped
-      if (!line.stat_value && !line.line) {
-        console.log(`DEBUG: Line ${index} skipped - no stat_value or line field`);
-        skippedCount++;
+      // The API structure is different - data is in over_under object
+      if (!line.over_under) {
+        console.log(`Line ${index}: Missing over_under object`);
         return;
       }
       
-      if (!line.appearance) {
-        console.log(`DEBUG: Line ${index} skipped - no appearance field`);
-        console.log(`DEBUG: Available fields:`, Object.keys(line));
-        skippedCount++;
+      const overUnder = line.over_under;
+      
+      // Get player info from appearance_stat
+      if (!overUnder.appearance_stat || !overUnder.appearance_stat.appearance) {
+        console.log(`Line ${index}: Missing appearance data`);
         return;
       }
       
-      // Try multiple ways to get player name
-      const player = line.appearance;
-      let playerName = player.name || 
-                       player.display_name ||
-                       (player.first_name && player.last_name ? `${player.first_name} ${player.last_name}` : null);
+      const appearance = overUnder.appearance_stat.appearance;
+      const player = appearance.player || {};
       
-      if (!playerName) {
-        console.log(`DEBUG: Line ${index} - couldn't find player name`);
-        console.log(`DEBUG: Appearance fields:`, Object.keys(player));
-        skippedCount++;
-        return;
-      }
+      // Get player name
+      const playerName = player.first_name && player.last_name 
+        ? `${player.first_name} ${player.last_name}`
+        : player.display_name || player.name || 'Unknown';
       
-      // Try multiple ways to get each field
-      const statValue = line.stat_value || line.line || line.over_under_line;
-      const league = line.game?.sport || 
-                     line.over_under?.appearance_stat?.game_stat?.game?.sport ||
-                     line.sport ||
-                     'Unknown';
-      const team = player.team?.name || 
-                   player.team_name || 
-                   player.team?.abbreviation ||
-                   '';
-      const statType = line.stat_type || 
-                       line.title || 
-                       line.stat ||
-                       '';
+      // Get stat info
+      const statInfo = overUnder.appearance_stat || {};
+      const statType = statInfo.display_stat || overUnder.title || '';
+      
+      // Get team info
+      const team = appearance.team?.name || '';
+      
+      // Get sport/league
+      const sport = overUnder.appearance_stat?.game_stat?.game?.sport || 'Unknown';
+      
+      // Get line value
+      const lineValue = line.stat_value || overUnder.stat_value || 0;
+      
+      // Get game time
+      const gameTime = overUnder.appearance_stat?.game_stat?.game?.scheduled_at || null;
       
       projections.push({
         platform: 'Underdog',
         playerName: playerName,
-        league: league.toUpperCase(),
+        league: sport.toUpperCase(),
         team: team,
         statType: statType,
-        line: parseFloat(statValue),
-        gameTime: line.match?.start_time || line.game?.scheduled_at || line.start_time || null,
+        line: parseFloat(lineValue),
+        gameTime: gameTime,
         gameDescription: ''
       });
     });
     
-    console.log(`Parsed ${projections.length} valid Underdog projections`);
-    console.log(`Skipped ${skippedCount} lines due to missing fields`);
+    console.log(`✓ Parsed ${projections.length} valid Underdog projections`);
     
-    // Show a sample of what we got
     if (projections.length > 0) {
-      console.log('DEBUG: Sample parsed projection:', projections[0]);
+      console.log('Sample projection:', projections[0]);
     }
     
     return projections;
     
   } catch (error) {
     console.error('Error fetching Underdog:', error.message);
-    console.error('Stack:', error.stack);
     return [];
   }
 }
