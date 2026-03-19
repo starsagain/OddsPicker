@@ -101,7 +101,7 @@ async function fetchPrizePicks() {
   }
 }
 
-// Fetch Underdog projections - SUPER DEBUG VERSION
+// Fetch Underdog projections - FILTER FOR PLAYER PROPS ONLY
 async function fetchUnderdog() {
   console.log('Fetching Underdog projections...');
   
@@ -128,80 +128,86 @@ async function fetchUnderdog() {
       return [];
     }
     
-    console.log(`Found ${data.over_under_lines.length} Underdog lines`);
+    console.log(`Found ${data.over_under_lines.length} total Underdog lines`);
     
-    // DUMP FIRST LINE COMPLETELY
-    if (data.over_under_lines.length > 0) {
-      console.log('===== FULL FIRST LINE STRUCTURE =====');
-      console.log(JSON.stringify(data.over_under_lines[0], null, 2));
-      console.log('===== END FIRST LINE =====');
-    }
-    
-    // Parse using actual API structure
+    // Parse - filter for PLAYER props only (not team spreads/totals)
     const projections = [];
+    let teamLines = 0;
+    let playerLines = 0;
     
     data.over_under_lines.forEach((line, index) => {
-      // Log what fields exist on each line
-      if (index < 3) {
-        console.log(`Line ${index} keys:`, Object.keys(line));
-        if (line.over_under) {
-          console.log(`Line ${index} over_under keys:`, Object.keys(line.over_under));
-        }
-      }
-      
-      // The API structure is different - data is in over_under object
-      if (!line.over_under) {
-        console.log(`Line ${index}: Missing over_under object`);
+      if (!line.over_under || !line.stat_value) {
         return;
       }
       
       const overUnder = line.over_under;
+      const appearanceStat = overUnder.appearance_stat;
       
-      // Get player info from appearance_stat
-      if (!overUnder.appearance_stat || !overUnder.appearance_stat.appearance) {
-        console.log(`Line ${index}: Missing appearance data`);
-        if (index < 3) {
-          console.log(`Line ${index} over_under structure:`, JSON.stringify(overUnder, null, 2).substring(0, 500));
-        }
+      if (!appearanceStat) {
         return;
       }
       
-      const appearance = overUnder.appearance_stat.appearance;
-      const player = appearance.player || {};
+      // Check if this is a TEAM line (spread, total, etc) vs PLAYER prop
+      const stat = appearanceStat.stat || '';
+      const displayStat = appearanceStat.display_stat || '';
       
-      // Get player name
-      const playerName = player.first_name && player.last_name 
-        ? `${player.first_name} ${player.last_name}`
-        : player.display_name || player.name || 'Unknown';
+      // Skip team lines (spread, moneyline, total points)
+      const teamStats = ['spread', 'moneyline', 'total_points', 'margin', 'total'];
+      if (teamStats.some(ts => stat.toLowerCase().includes(ts) || displayStat.toLowerCase().includes(ts))) {
+        teamLines++;
+        return;
+      }
       
-      // Get stat info
-      const statInfo = overUnder.appearance_stat || {};
-      const statType = statInfo.display_stat || overUnder.title || '';
+      // This should be a player prop - look for player in options
+      if (!line.options || line.options.length === 0) {
+        return;
+      }
       
-      // Get team info
-      const team = appearance.team?.name || '';
+      playerLines++;
       
-      // Get sport/league
-      const sport = overUnder.appearance_stat?.game_stat?.game?.sport || 'Unknown';
+      // Get player name from options
+      const firstOption = line.options[0];
+      const playerName = firstOption.selection_header || 'Unknown Player';
+      
+      // Get stat type
+      const statType = displayStat || stat || '';
+      
+      // Get team from title (format: "TEAM @ TEAM Stat")
+      const title = overUnder.title || '';
+      const teamMatch = title.match(/^([A-Z]+)/);
+      const team = teamMatch ? teamMatch[1] : '';
+      
+      // Get league/sport - need to look elsewhere
+      // For now, default to Unknown - we'll enhance this
+      const league = 'NBA'; // Most Underdog lines are NBA
       
       // Get line value
-      const lineValue = line.stat_value || overUnder.stat_value || 0;
+      const lineValue = parseFloat(line.stat_value);
       
-      // Get game time
-      const gameTime = overUnder.appearance_stat?.game_stat?.game?.scheduled_at || null;
+      // Log first few player props to verify
+      if (playerLines <= 3) {
+        console.log(`Player prop ${playerLines}:`, {
+          player: playerName,
+          stat: statType,
+          line: lineValue,
+          team: team
+        });
+      }
       
       projections.push({
         platform: 'Underdog',
         playerName: playerName,
-        league: sport.toUpperCase(),
+        league: league,
         team: team,
         statType: statType,
-        line: parseFloat(lineValue),
-        gameTime: gameTime,
-        gameDescription: ''
+        line: lineValue,
+        gameTime: null,
+        gameDescription: title
       });
     });
     
+    console.log(`Team lines filtered out: ${teamLines}`);
+    console.log(`Player props found: ${playerLines}`);
     console.log(`✓ Parsed ${projections.length} valid Underdog projections`);
     
     if (projections.length > 0) {
