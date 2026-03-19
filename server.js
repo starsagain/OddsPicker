@@ -80,12 +80,17 @@ async function fetchPlayerProps(sport, market) {
   }
 }
 
-// Parse events and extract player props
+// Parse events and extract player props - SHOW ALL (no EV filter)
 function parsePlayerProps(events, sport, market) {
   const plays = [];
   
+  console.log(`  Parsing ${events.length} events...`);
+  
   events.forEach(event => {
-    if (!event.bookmakers || event.bookmakers.length === 0) return;
+    if (!event.bookmakers || event.bookmakers.length === 0) {
+      console.log(`  Event has no bookmakers: ${event.away_team} @ ${event.home_team}`);
+      return;
+    }
     
     const gameInfo = `${event.away_team} @ ${event.home_team}`;
     const gameTime = event.commence_time;
@@ -94,7 +99,14 @@ function parsePlayerProps(events, sport, market) {
       if (!book.markets) return;
       
       book.markets.forEach(mkt => {
-        if (mkt.key !== market || !mkt.outcomes) return;
+        if (mkt.key !== market) return;
+        
+        if (!mkt.outcomes) {
+          console.log(`  Market has no outcomes`);
+          return;
+        }
+        
+        console.log(`  Found ${mkt.outcomes.length} outcomes in ${market} market`);
         
         // Group outcomes by player
         const playerMap = new Map();
@@ -113,52 +125,49 @@ function parsePlayerProps(events, sport, market) {
           if (outcome.name === 'Under') player.under = outcome.price;
         });
         
-        // Calculate EV for each player
+        console.log(`  Grouped into ${playerMap.size} unique player/line combinations`);
+        
+        // Add ALL props (no EV filter)
         playerMap.forEach((data, key) => {
           if (!data.over || !data.under) return;
           
           const edge = calculateNoVig(data.over, data.under);
           
-          // Add Over if +EV
-          if (edge.overEV > 0) {
-            plays.push({
-              id: plays.length,
-              name: data.player,
-              league: sport.replace(/_/g, ' ').toUpperCase(),
-              game: gameInfo,
-              gameTime: gameTime,
-              stat: 'Over',
-              line: market.replace('player_', '').replace(/_/g, ' '),
-              value: data.line,
-              fairProb: edge.fairOver,
-              evPercent: edge.overEV,
-              odds: data.over,
-              book: book.title
-            });
-          }
+          // Add Over
+          plays.push({
+            id: plays.length,
+            name: data.player,
+            league: sport.replace(/_/g, ' ').toUpperCase(),
+            game: gameInfo,
+            gameTime: gameTime,
+            stat: 'Over',
+            line: market.replace('player_', '').replace(/_/g, ' '),
+            value: data.line,
+            fairProb: edge.fairOver,
+            odds: data.over,
+            book: book.title
+          });
           
-          // Add Under if +EV
-          if (edge.underEV > 0) {
-            plays.push({
-              id: plays.length,
-              name: data.player,
-              league: sport.replace(/_/g, ' ').toUpperCase(),
-              game: gameInfo,
-              gameTime: gameTime,
-              stat: 'Under',
-              line: market.replace('player_', '').replace(/_/g, ' '),
-              value: data.line,
-              fairProb: edge.fairUnder,
-              evPercent: edge.underEV,
-              odds: data.under,
-              book: book.title
-            });
-          }
+          // Add Under
+          plays.push({
+            id: plays.length,
+            name: data.player,
+            league: sport.replace(/_/g, ' ').toUpperCase(),
+            game: gameInfo,
+            gameTime: gameTime,
+            stat: 'Under',
+            line: market.replace('player_', '').replace(/_/g, ' '),
+            value: data.line,
+            fairProb: edge.fairUnder,
+            odds: data.under,
+            book: book.title
+          });
         });
       });
     });
   });
   
+  console.log(`  Total props extracted: ${plays.length}`);
   return plays;
 }
 
@@ -193,8 +202,8 @@ async function refreshData() {
       }
     }
     
-    // Sort by EV
-    allPlays.sort((a, b) => b.evPercent - a.evPercent);
+      // Sort by probability (highest first)
+      allPlays.sort((a, b) => b.fairProb - a.fairProb);
     
     cachedData = allPlays;
     lastUpdate = Date.now();
@@ -205,14 +214,14 @@ async function refreshData() {
     console.log('✅ REFRESH COMPLETE');
     console.log('='.repeat(60));
     console.log(`Games scanned: ${totalGames}`);
-    console.log(`+EV plays found: ${allPlays.length}`);
+    console.log(`Props found: ${allPlays.length}`);
     console.log(`Duration: ${duration}s`);
     console.log(`Credits used: ${creditsUsed}`);
     console.log('='.repeat(60));
     
     return {
       success: true,
-      message: `Found ${allPlays.length} +EV plays from ${totalGames} games`,
+      message: `Found ${allPlays.length} player props from ${totalGames} games`,
       data: allPlays
     };
     
@@ -258,7 +267,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fantasy Optimizer - +EV Player Props</title>
+  <title>Fantasy Optimizer - Player Props</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -331,7 +340,7 @@ app.get('/', (req, res) => {
               <div className="flex items-center justify-between mb-6">
                 <div>
                   <h1 className="text-4xl font-bold mb-2">FANTASY OPTIMIZER</h1>
-                  <p className="text-purple-300">+EV Player Props Finder</p>
+                  <p className="text-purple-300">Player Props & Parlay Builder</p>
                 </div>
                 <div className="text-right">
                   <div className="text-sm text-slate-400 mb-2">
@@ -376,7 +385,7 @@ app.get('/', (req, res) => {
               {!loading && plays.length === 0 && !refreshing && (
                 <div className="text-center py-20">
                   <h2 className="text-2xl font-bold mb-4">No Data</h2>
-                  <p className="text-slate-400 mb-6">Click refresh to fetch +EV plays</p>
+                  <p className="text-slate-400 mb-6">Click refresh to fetch player props</p>
                   <button
                     onClick={handleRefresh}
                     className="px-8 py-4 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium text-lg"
@@ -389,8 +398,8 @@ app.get('/', (req, res) => {
               {!loading && filtered.length > 0 && (
                 <div>
                   <div className="bg-slate-800/50 rounded-lg p-4 mb-6">
-                    <h2 className="text-2xl font-bold">{filtered.length} +EV Plays</h2>
-                    <p className="text-slate-400 text-sm">Sorted by highest EV</p>
+                    <h2 className="text-2xl font-bold">{filtered.length} Player Props</h2>
+                    <p className="text-slate-400 text-sm">Sorted by highest probability</p>
                   </div>
                   
                   <div className="space-y-4">
@@ -412,12 +421,9 @@ app.get('/', (req, res) => {
                             <p className="text-xs text-slate-600 mt-1">Book: {play.book} ({play.odds > 0 ? '+' : ''}{play.odds})</p>
                           </div>
                           <div className="text-right">
-                            <div className="text-xs text-slate-400 mb-1">Fair Prob</div>
-                            <div className="text-3xl font-bold text-emerald-400 mb-1">
+                            <div className="text-xs text-slate-400 mb-1">Win Probability</div>
+                            <div className="text-3xl font-bold text-emerald-400">
                               {play.fairProb.toFixed(1)}%
-                            </div>
-                            <div className="text-lg font-bold text-emerald-400">
-                              +{play.evPercent.toFixed(1)}% EV
                             </div>
                           </div>
                         </div>
