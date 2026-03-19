@@ -101,7 +101,7 @@ async function fetchPrizePicks() {
   }
 }
 
-// Fetch Underdog projections - FIXED for actual API structure
+// Fetch Underdog projections - SUPER DEBUG VERSION
 async function fetchUnderdog() {
   console.log('Fetching Underdog projections...');
   
@@ -130,10 +130,25 @@ async function fetchUnderdog() {
     
     console.log(`Found ${data.over_under_lines.length} Underdog lines`);
     
+    // DUMP FIRST LINE COMPLETELY
+    if (data.over_under_lines.length > 0) {
+      console.log('===== FULL FIRST LINE STRUCTURE =====');
+      console.log(JSON.stringify(data.over_under_lines[0], null, 2));
+      console.log('===== END FIRST LINE =====');
+    }
+    
     // Parse using actual API structure
     const projections = [];
     
     data.over_under_lines.forEach((line, index) => {
+      // Log what fields exist on each line
+      if (index < 3) {
+        console.log(`Line ${index} keys:`, Object.keys(line));
+        if (line.over_under) {
+          console.log(`Line ${index} over_under keys:`, Object.keys(line.over_under));
+        }
+      }
+      
       // The API structure is different - data is in over_under object
       if (!line.over_under) {
         console.log(`Line ${index}: Missing over_under object`);
@@ -145,6 +160,9 @@ async function fetchUnderdog() {
       // Get player info from appearance_stat
       if (!overUnder.appearance_stat || !overUnder.appearance_stat.appearance) {
         console.log(`Line ${index}: Missing appearance data`);
+        if (index < 3) {
+          console.log(`Line ${index} over_under structure:`, JSON.stringify(overUnder, null, 2).substring(0, 500));
+        }
         return;
       }
       
