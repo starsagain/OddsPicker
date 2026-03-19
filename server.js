@@ -56,7 +56,8 @@ function calculateNoVig(overOdds, underOdds) {
 
 // Fetch player props from The Odds API
 async function fetchPlayerProps(sport, market) {
-  const url = `${BASE_URL}/sports/${sport}/odds?apiKey=${API_KEY}&regions=us&markets=${market}&oddsFormat=american&bookmakers=${BOOKMAKERS}`;
+  // Try WITHOUT bookmakers filter first to see if that's the issue
+  const url = `${BASE_URL}/sports/${sport}/odds?apiKey=${API_KEY}&regions=us&markets=${market}&oddsFormat=american`;
   
   console.log(`Fetching ${sport} - ${market}...`);
   
@@ -65,6 +66,9 @@ async function fetchPlayerProps(sport, market) {
     
     if (!response.ok) {
       console.log(`  ✗ Error ${response.status}`);
+      // Log the actual error message
+      const errorText = await response.text();
+      console.log(`  Error details: ${errorText.substring(0, 200)}`);
       return [];
     }
     
