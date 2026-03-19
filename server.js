@@ -13,12 +13,13 @@ let cachedData = [];
 let lastUpdate = null;
 let creditsUsed = 0;
 
-// Sports and markets to fetch
+// Sports and markets to fetch - CORRECTED MARKET NAMES
 const SPORTS_MARKETS = [
   { sport: 'basketball_nba', markets: ['player_points', 'player_rebounds', 'player_assists', 'player_threes'] },
   { sport: 'americanfootball_nfl', markets: ['player_pass_tds', 'player_pass_yds', 'player_rush_yds', 'player_receptions'] },
-  { sport: 'icehockey_nhl', markets: ['player_points', 'player_shots_on_goal'] },
-  { sport: 'baseball_mlb', markets: ['player_hits', 'player_total_bases', 'player_rbis'] }
+  { sport: 'icehockey_nhl', markets: ['player_points', 'player_assists', 'player_shots_on_goal'] },
+  // MLB is off-season, remove for now
+  // { sport: 'baseball_mlb', markets: ['player_hits', 'player_total_bases', 'player_rbis'] }
 ];
 
 // Bookmakers that have player props
@@ -56,7 +57,6 @@ function calculateNoVig(overOdds, underOdds) {
 
 // Fetch player props from The Odds API
 async function fetchPlayerProps(sport, market) {
-  // Try WITHOUT bookmakers filter first to see if that's the issue
   const url = `${BASE_URL}/sports/${sport}/odds?apiKey=${API_KEY}&regions=us&markets=${market}&oddsFormat=american`;
   
   console.log(`Fetching ${sport} - ${market}...`);
@@ -65,15 +65,21 @@ async function fetchPlayerProps(sport, market) {
     const response = await fetch(url);
     
     if (!response.ok) {
-      console.log(`  ✗ Error ${response.status}`);
-      // Log the actual error message
       const errorText = await response.text();
-      console.log(`  Error details: ${errorText.substring(0, 200)}`);
+      console.log(`  ✗ Error ${response.status}: ${errorText.substring(0, 150)}`);
+      
+      // Check if it's a market issue vs no games issue
+      if (errorText.includes('INVALID_MARKET')) {
+        console.log(`  → Market "${market}" not supported for ${sport}`);
+      } else if (errorText.includes('NO_EVENTS')) {
+        console.log(`  → No games available for ${sport} right now`);
+      }
+      
       return [];
     }
     
     const events = await response.json();
-    console.log(`  ✓ Found ${events.length} games`);
+    console.log(`  ✓ Found ${events.length} games with ${market} markets`);
     
     creditsUsed++;
     return events;
